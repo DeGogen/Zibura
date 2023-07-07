@@ -1,0 +1,156 @@
+#!/bin/perl
+use Crypt::CBC;
+use Asterisk::AGI;
+use Authen::Radius;
+use Digest::MD5 qw(md5_hex);
+use warnings;
+use IO::Socket::UNIX;
+
+#смотри код пиши логин, пасс порт и прочее попрвь
+
+$AGI = new Asterisk::AGI;
+
+my %input = $AGI->ReadParse();
+
+$AGI->verbose("AGI Environment Dump:", 3);
+foreach my $i (sort keys %input) {
+	$AGI->verbose(" -- $i = $input{$i}", 3);
+	}
+
+my $rad_type = $ARGV[0];
+#my $rad_type = $AGI->get_variable('ACCESS');
+
+Authen::Radius->load_dictionary();
+
+if ($rad_type eq "access")
+	{access();
+	}
+elsif ($rad_type eq "start")
+	{start();
+	}
+elsif ($rad_type eq "stop")
+	{stop();
+	}
+else 
+	{	
+	$AGI->verbose("Wrong type argument");
+	$AGI->hangup();
+	exit;
+	}
+
+sub access {
+my $r = new Authen::Radius(Host => $AGI->get_variable('RADIUS_Server')."\:".$AGI->get_variable('RADIUS_Auth_Port'), Secret => $AGI->get_variable('RADIUS_Secret'));
+if( !defined $r ) {
+        $AGI->verbose('RADIUS server "'.$AGI->get_variable('RADIUS_Server').'" ERROR', 3);
+        $AGI->hangup();
+        exit;
+	}
+my %rad_attr;
+
+$r->add_attributes (
+	{ Name => 'User-Name', Value => "$input{calleridname}" },
+	{ Name => 'Password', Value => '' },
+	{ Name => 'Calling-Station-Id', Value => "$input{calleridname}" },
+	{ Name => 'Called-Station-Id', Value => "$input{dnid}" },
+			);
+#todo - not implemented yet
+#$r->add_attributes (
+#	{ Name => 'User-Name', Value => "$ARGV[1]" },
+#	{ Name => 'Password', Value => '' },
+#	{ Name => 'Calling-Station-Id', Value => "$ARGV[1]" },
+#	{ Name => 'Called-Station-Id', Value => "$ARGV[2]" },
+#			);
+
+$r->send_packet (ACCESS_REQUEST) and $type = $r->recv_packet;
+
+if($r->get_error() != 0) {
+	$AGI->verbose("Radius Error = ".$r->strerror($r->get_error())."\n");
+	$AGI->hangup();
+	exit;
+	}
+if( !defined $type ) {
+	$AGI->verbose("No responce from RADIUS server", 3);
+	$AGI->hangup();
+	exit;
+	}
+elsif ($type == 2) {
+	$AGI->verbose("RADIUS_Status: ACCEPT", 3);
+	$AGI->set_variable('RADIUS_Status', "ACCEPT");
+	} 
+
+elsif ($type == 3) {
+	$AGI->verbose("RADIUS_Status: REJECT", 3);
+	$AGI->set_variable('RADIUS_Status', "REJECT");
+ 	$AGI->set_context('nomoney');
+ 	$AGI->set_extension('s');
+ 	$AGI->set_priority('1');
+# 	$AGI->hangup();
+	exit;
+	} 
+else {
+	$AGI->verbose("RADIUS_Status: $type", 3);
+	$AGI->hangup();
+	exit;
+	}
+	
+$AGI->verbose("Radius attributes:", 3);
+
+for my $a ($r->get_attributes()) {
+	my $key = $a->{'Name'};
+	$rad_attr{$key} = $a->{'Value'};
+	$AGI->verbose("-- name=$a->{'Name'} value=$a->{'Value'}\n, 3");	
+	}
+
+if (exists($rad_attr{'h323-credit-time'})){
+	$AGI->verbose("-- max call duration time = $rad_attr{'h323-credit-time'}\n, 3");
+	$AGI->set_variable('MAXDUR',"$rad_attr{'h323-credit-time'}");
+	}
+else 
+	{$AGI->verbose("-- max call duration time not found. hangup and exiting\n, 3");
+	$AGI->hangup();
+        exit;
+	}
+	
+exit;}
+
+sub start {
+my $r = new Authen::Radius(Host => $AGI->get_variable('RADIUS_Server')."\:".$AGI->get_variable('RADIUS_Acct_Port'), Secret => $AGI->get_variable('RADIUS_Secret'));
+if( !defined $r ) {
+        $AGI->verbose('RADIUS server "'.$AGI->get_variable('RADIUS_Server').'" ERROR', 3);
+        $AGI->hangup();
+        exit;
+	}	
+	my %rad_attr;
+$r->add_attributes (
+	{ Name => 'Calling-Station-Id', Value => "$ARGV[1]" },
+	{ Name => 'Called-Station-Id', Value => "$ARGV[2]" },
+	{ Name => 'Acct-Status-Type' , Value => 'Start' },
+	{ Name => 'Acct-Session-Id' , Value => "$ARGV[3]" },
+			);
+
+$r->send_packet (ACCOUNTING_REQUEST) and $type = $r->recv_packet;
+if($r->get_error() != 0) {
+	$AGI->verbose("Radius Error = ".$r->strerror($r->get_error())."\n");
+	$AGI->hangup();
+	}	
+	exit;}
+	
+sub stop {
+
+	my %rad_attr;
+my $r = new Authen::Radius(Host => $AGI->get_variable('RADIUS_Server')."\:".$AGI->get_variable('RADIUS_Acct_Port'), Secret => $AGI->get_variable('RADIUS_Secret'));
+if( !defined $r ) {
+        $AGI->verbose('RADIUS server "'.$AGI->get_variable('RADIUS_Server').'" ERROR', 3);
+        $AGI->hangup();
+        exit;
+	}
+$r->add_attributes (
+	{ Name => 'Calling-Station-Id', Value => "$input{calleridname}" },
+	{ Name => 'Called-Station-Id', Value => "$input{dnid}" },
+	{ Name => 'Acct-Status-Type' , Value => 'Stop' },
+	{ Name => 'Acct-Session-Id' , Value => "$input{uniqueid}" },
+			);
+
+$r->send_packet (ACCOUNTING_REQUEST) and $type = $r->recv_packet;
+
+	exit;}	
